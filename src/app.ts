@@ -64,7 +64,7 @@ function parseIp(value: string | undefined): string | null {
 const trackQuery = z
   .object({
     kind: z.enum(['view', 'query', 'error']),
-    page: z.enum(['home', 'company', 'sources']).optional(),
+    page: z.enum(['home', 'company', 'sources', 'prep', 'question']).optional(),
     company: z.string().regex(/^[a-z0-9-]{1,60}$/).optional(),
     category: z.enum(['dsa', 'hld', 'ai', 'behavioral']).optional(),
     status: z.coerce.number().int().min(0).max(599).optional(),
@@ -77,6 +77,9 @@ async function visitorId(ip: string, day: string, pepper: string): Promise<strin
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${ip}|${day}|${pepper}`));
   return [...new Uint8Array(digest).slice(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
+
+const prepKind = z.enum(['ai', 'system-design']);
+const prepQuery = z.object({ ...paging, topic: z.string().trim().min(1).max(80).optional() }).strict();
 
 const paged = (page: number, limit: number) => ({ page, limit, offset: (page - 1) * limit });
 
@@ -162,6 +165,15 @@ export function createApp(store: DataStore, config: AppConfig) {
   v1.get('/companies/:slug/behavioral', async (c) => {
     parse(c, noQuery);
     return c.json({ data: await store.getBehavioral((await company(c)).id), meta: {} });
+  });
+
+  // Questions that have an interview answer, for the AI and system design prep sections.
+  v1.get('/prep/:kind', async (c) => {
+    const kind = prepKind.safeParse(c.req.param('kind'));
+    if (!kind.success) throw new HttpError(404, 'not_found', 'unknown section');
+    const { topic, page, limit } = parse(c, prepQuery);
+    const { items, total, questions, topics } = await store.listPrep(kind.data, topic, paged(page, limit));
+    return listing(c, items, page, limit, total, { questions, topics });
   });
 
   v1.get('/resources/:id', async (c) => {

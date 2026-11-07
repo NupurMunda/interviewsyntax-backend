@@ -97,10 +97,60 @@ export interface ListItem {
 export interface HldItem extends ListItem {
   url: null;
   solutions: Solution[];
+  summary: string | null;
+  links: PrepLink[];
+}
+
+export interface AiItem extends ListItem {
+  has_answer: boolean;
+}
+
+export interface AnswerSection {
+  heading: string;
+  paragraphs: string[];
+  points: string[];
+}
+
+export interface Answer {
+  short: string;
+  sections: AnswerSection[];
+  mistakes: string[];
+  follow_ups: string[];
+  sources: { title: string; url: string }[];
+  written: string;
+}
+
+export type PrepKind = 'ai' | 'system-design';
+
+export interface PrepLink {
+  label: string;
+  url: string;
+}
+
+export interface PrepItem {
+  id: number;
+  title: string;
+  topics: string[];
+  written: string | null;
+  summary: string | null;
+  concepts: string[];
+  links: PrepLink[];
+}
+
+export interface PrepTopic {
+  name: string;
+  answered: number;
+  total: number;
+}
+
+export interface PrepList extends Page<PrepItem> {
+  questions: number;
+  topics: PrepTopic[];
 }
 
 export interface ResourceDetail extends ListItem {
   category: ApiCategory;
+  answer: Answer | null;
   content_md: string | null;
   source: { name: string; license: string };
   companies: { name: string; slug: string }[];
@@ -138,9 +188,10 @@ export interface DataStore {
   getCompany(company: CompanyRef): Promise<CompanyDetail>;
   listDsa(companyId: number, query: DsaQuery): Promise<Page<DsaItem>>;
   listHld(companyId: number, paging: Paging): Promise<Page<HldItem>>;
-  listAi(companyId: number, paging: Paging): Promise<Page<ListItem>>;
+  listAi(companyId: number, paging: Paging): Promise<Page<AiItem>>;
   getBehavioral(companyId: number): Promise<{ values: Value[]; topics: Topic[] }>;
   getResource(id: number): Promise<ResourceDetail | null>;
+  listPrep(kind: PrepKind, topic: string | undefined, paging: Paging): Promise<PrepList>;
   listSources(): Promise<SourceCredit[]>;
   getGraph(limit: number): Promise<Graph>;
 }

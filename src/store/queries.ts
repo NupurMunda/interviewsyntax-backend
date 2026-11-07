@@ -1,5 +1,5 @@
 import type {
-  ApiCategory, CompanyDetail, CompanyRef, Counts, DataStore, DsaItem, Graph, HldItem, ListItem, Profile, ResourceDetail, Solution, Topic, Value,
+  Answer, AiItem, ApiCategory, CompanyDetail, CompanyRef, Counts, DataStore, DsaItem, Graph, HldItem, ListItem, PrepKind, Profile, ResourceDetail, Solution, Topic, Value,
 } from './types';
 
 export type Row = Record<string, unknown>;
@@ -12,6 +12,7 @@ const CATEGORIES: Record<Exclude<ApiCategory, 'behavioral'>, string[]> = {
   hld: ['hld', 'system-design'],
   ai: ['ai'],
 };
+const PREP_CATEGORY: Record<PrepKind, string> = { ai: 'ai', 'system-design': 'hld' };
 const inList = (values: string[]) => values.map((v) => `'${v}'`).join(',');
 const SERVED_CATEGORIES = inList(Object.values(CATEGORIES).flat());
 
@@ -186,10 +187,43 @@ export function createStore(run: Run): DataStore {
       );
       const byQuestion = new Map<number, Solution[]>();
       for (const r of rows) byQuestion.set(num(r.question_id), [...(byQuestion.get(num(r.question_id)) ?? []), solution(r)]);
-      return { total: page.total, items: page.items.map((i): HldItem => ({ ...i, url: null, solutions: byQuestion.get(i.id) ?? [] })) };
+      // Our own collected links and summary come first; the matcher's solutions stay as a fallback.
+      const ids = page.items.map((i) => i.id);
+      const linkRows = ids.length
+        ? await run(
+          `SELECT ql.resource_id, ql.label, ql.url FROM question_links ql JOIN sources s ON s.id = ql.source_id
+           WHERE ql.resource_id IN (${ids.join(',')}) AND ${VISIBLE} ORDER BY ql.resource_id, ql.position`, [],
+        )
+        : [];
+      const infoRows = ids.length
+        ? await run(
+          `SELECT qi.resource_id, qi.summary FROM question_info qi JOIN sources s ON s.id = qi.source_id
+           WHERE qi.resource_id IN (${ids.join(',')}) AND ${VISIBLE}`, [],
+        )
+        : [];
+      return {
+        total: page.total,
+        items: page.items.map((i): HldItem => ({
+          ...i, url: null, solutions: byQuestion.get(i.id) ?? [],
+          summary: str(infoRows.find((r) => num(r.resource_id) === i.id)?.summary),
+          links: linkRows.filter((r) => num(r.resource_id) === i.id).map((r) => ({ label: String(r.label), url: String(r.url) })),
+        })),
+      };
     },
 
-    listAi: (companyId, { limit, offset }) => categoryPage(companyId, 'ai', limit, offset),
+    async listAi(companyId, { limit, offset }) {
+      const page = await categoryPage(companyId, 'ai', limit, offset);
+      const ids = page.items.map((i) => i.id);
+      const answered = new Set(
+        ids.length
+          ? (await run(
+            `SELECT qa.resource_id FROM question_answers qa JOIN sources s ON s.id = qa.source_id
+             WHERE qa.resource_id IN (${ids.join(',')}) AND ${VISIBLE}`, [],
+          )).map((r) => num(r.resource_id))
+          : [],
+      );
+      return { total: page.total, items: page.items.map((i): AiItem => ({ ...i, has_answer: answered.has(i.id) })) };
+    },
 
     async getBehavioral(companyId) {
       const topicRows = await run(
@@ -200,6 +234,46 @@ export function createStore(run: Run): DataStore {
         slug: String(r.slug), name: String(r.name), question_types: str(r.question_types), typical_round: str(r.typical_round),
       }));
       return { values: await values(companyId), topics };
+    },
+
+    async listPrep(kind, topic, { limit, offset }) {
+      const category = PREP_CATEGORY[kind];
+      // AI prep lists the questions that have a written answer; system design lists every question with its collected links.
+      const listAll = kind === 'system-design';
+      const where = `FROM ${listAll ? '' : 'question_answers qa JOIN '}resources r ${listAll ? '' : 'ON r.id = qa.resource_id '}JOIN sources s ON s.id = r.source_id
+        WHERE r.category = ? AND ${VISIBLE} AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(r.topics) j WHERE j.value = ?))`;
+      const params = [category, topic ?? null, topic ?? null];
+      const rows = await run(`SELECT r.id, r.title, r.topics, ${listAll ? 'NULL' : 'qa.written'} AS written ${where} ORDER BY ${listAll ? '' : 'qa.written DESC, '}r.id LIMIT ? OFFSET ?`, [...params, limit, offset]);
+      const ids = rows.map((r) => num(r.id));
+      const linkRows = listAll && ids.length
+        ? await run(
+          `SELECT ql.resource_id, ql.label, ql.url FROM question_links ql JOIN sources s ON s.id = ql.source_id
+           WHERE ql.resource_id IN (${ids.join(',')}) AND ${VISIBLE} ORDER BY ql.resource_id, ql.position`, [],
+        )
+        : [];
+      const infoRows = listAll && ids.length
+        ? await run(
+          `SELECT qi.resource_id, qi.summary, qi.concepts_json FROM question_info qi JOIN sources s ON s.id = qi.source_id
+           WHERE qi.resource_id IN (${ids.join(',')}) AND ${VISIBLE}`, [],
+        )
+        : [];
+      const perTopic = await run(
+        `SELECT j.value AS name, COUNT(*) AS total, COUNT(qa.resource_id) AS answered
+         FROM resources r JOIN sources s ON s.id = r.source_id JOIN json_each(r.topics) j
+         LEFT JOIN question_answers qa ON qa.resource_id = r.id
+         WHERE r.category = ? AND ${VISIBLE} GROUP BY j.value ORDER BY total DESC, name`, [category],
+      );
+      return {
+        items: rows.map((r) => ({
+          id: num(r.id), title: String(r.title), topics: topics(r.topics), written: str(r.written),
+          summary: str(infoRows.find((i) => num(i.resource_id) === num(r.id))?.summary),
+          concepts: topics(infoRows.find((i) => num(i.resource_id) === num(r.id))?.concepts_json),
+          links: linkRows.filter((l) => num(l.resource_id) === num(r.id)).map((l) => ({ label: String(l.label), url: String(l.url) })),
+        })),
+        total: await total(`SELECT COUNT(*) AS n ${where}`, params),
+        questions: await total(`SELECT COUNT(*) AS n FROM resources r JOIN sources s ON s.id = r.source_id WHERE r.category = ? AND ${VISIBLE}`, [category]),
+        topics: perTopic.map((r) => ({ name: String(r.name), answered: num(r.answered), total: num(r.total) })),
+      };
     },
 
     async getResource(id) {
@@ -217,8 +291,13 @@ export function createStore(run: Run): DataStore {
         `SELECT qs.title, qs.url, qs.confidence, s.name AS source FROM question_solutions qs JOIN sources s ON s.id = qs.source_id
          WHERE qs.question_id = ? AND qs.approved = 1 AND ${VISIBLE} ORDER BY qs.id`, [id],
       );
+      const a = await one(
+        `SELECT qa.answer_json, qa.written FROM question_answers qa JOIN sources s ON s.id = qa.source_id
+         WHERE qa.resource_id = ? AND ${VISIBLE}`, [id],
+      );
+      const answer: Answer | null = a ? { ...JSON.parse(String(a.answer_json)), written: String(a.written) } : null;
       return {
-        ...listItem(r), category: apiCategory(String(r.category)), content_md: str(r.content_md),
+        ...listItem(r), category: apiCategory(String(r.category)), answer, content_md: str(r.content_md),
         source: { name: String(r.source), license: String(r.license) },
         companies: companies.map((c) => ({ name: String(c.name), slug: String(c.slug) })),
         solutions: solutions.map(solution),

@@ -27,7 +27,7 @@ async function get(path: string, target = app) {
 const allPaths = [
   '/health', '/companies', '/companies/acme', '/companies/acme/dsa', '/companies/acme/hld', '/companies/acme/ai',
   '/companies/acme/behavioral', '/companies/globex', '/companies/globex/dsa', '/companies/initech', '/companies/initech/behavioral',
-  '/graph', '/graph?limit=1', '/sources', ...Array.from({ length: 20 }, (_, i) => `/resources/${i + 1}`),
+  '/graph', '/graph?limit=1', '/sources', '/prep/ai', '/prep/system-design', '/prep/ai?topic=Topic%20AI', ...Array.from({ length: 20 }, (_, i) => `/resources/${i + 1}`),
 ];
 
 describe('response shapes', () => {
@@ -87,12 +87,17 @@ describe('response shapes', () => {
     expect(body.data[0]).toMatchObject({ id: 11, title: 'Fixture HLD question', difficulty: null });
     expect(body.data[0].solutions).toEqual([{ title: 'Fixture approved solution', url: 'https://example.test/sol/1', confidence: 'high', source: 'manual:fx-notes' }]);
     expect(body.data[1].solutions).toEqual([]);
+    expect(body.data[0].summary).toBe('FAKE SUMMARY for the fixture question');
+    expect(body.data[0].links.map((l: any) => l.label)).toEqual(['Fixture link one', 'Fixture link two']);
+    expect(body.data[1].links).toEqual([]);
+    expect(JSON.stringify(body)).not.toContain('HIDDEN');
   });
 
   it('GET /companies/:slug/ai', async () => {
     const { body } = await get('/companies/acme/ai');
     expect(body.meta.total).toBe(2);
     expect(body.data.map((d: any) => d.title)).toEqual(['Fixture AI question one', 'Fixture AI question two']);
+    expect(body.data.map((d: any) => d.has_answer)).toEqual([true, false]);
   });
 
   it('GET /companies/:slug/behavioral returns values and topics', async () => {
@@ -387,5 +392,51 @@ describe('rate-limit key', () => {
     const as = (ip: string) => app.request('/v1/health', { headers: { 'x-api-key': 'secret-key', 'x-client-ip': ip } });
     expect([(await as('198.51.100.1')).status, (await as('198.51.100.1')).status, (await as('198.51.100.1')).status]).toEqual([200, 200, 429]);
     expect((await as('198.51.100.2')).status).toBe(200);
+  });
+});
+
+describe('interview answers', () => {
+  it('GET /resources/:id carries the answer, or null when there is none', async () => {
+    const { body } = await get('/resources/1');
+    expect(body.data.answer.short).toBe('FAKE SHORT ANSWER AI');
+    expect(body.data.answer.sections[0]).toEqual({ heading: 'Fixture heading AI', paragraphs: ['FAKE PARAGRAPH AI'], points: ['FAKE POINT AI'] });
+    expect(body.data.answer.sources).toEqual([{ title: 'Fixture source AI', url: 'https://example.test/answer-source' }]);
+    expect(body.data.answer.written).toBe('2026-01-03');
+    expect((await get('/resources/2')).body.data.answer).toBeNull();
+  });
+
+  it('GET /prep/ai lists answered questions with per-topic progress', async () => {
+    const { res, body } = await get('/prep/ai');
+    expect(res.status).toBe(200);
+    expect(body.data).toEqual([{ id: 1, title: 'Fixture AI question one', topics: ['Topic AI'], written: '2026-01-03', summary: null, concepts: [], links: [] }]);
+    expect(body.meta).toEqual({ page: 1, limit: 20, total: 1, questions: 2, topics: [{ name: 'Topic AI', answered: 1, total: 2 }] });
+  });
+
+  it('GET /prep/system-design lists the visible hld questions with their links in order', async () => {
+    const { body } = await get('/prep/system-design');
+    expect(body.data.map((q: any) => q.id)).toEqual([11]);
+    expect(body.data[0].summary).toBe('FAKE SUMMARY for the fixture question');
+    expect(body.data[0].concepts).toEqual(['fake concept one', 'fake concept two', 'fake concept three']);
+    expect(body.data[0].links).toEqual([
+      { label: 'Fixture link one', url: 'https://example.test/link/1' },
+      { label: 'Fixture link two', url: 'https://example.test/link/2' },
+    ]);
+    expect(body.meta.questions).toBe(1);
+  });
+
+  it('filters by topic, and a topic with no answers is empty', async () => {
+    expect((await get('/prep/ai?topic=Topic%20AI')).body.meta.total).toBe(1);
+    expect((await get('/prep/ai?topic=Nothing')).body.data).toEqual([]);
+  });
+
+  it('never shows an answer that belongs to a hidden source', async () => {
+    const all = (await get('/prep/system-design')).text + (await get('/resources/15')).text;
+    expect(all).not.toContain('HIDDEN');
+    expect((await get('/resources/15')).res.status).toBe(404);
+  });
+
+  it('rejects an unknown section and unknown parameters', async () => {
+    expect((await get('/prep/behavioral')).res.status).toBe(404);
+    expect((await get('/prep/ai?foo=1')).res.status).toBe(400);
   });
 });

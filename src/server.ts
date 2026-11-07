@@ -13,5 +13,5 @@ const app = createApp(sqliteStore(dbPath), {
 });
 
 serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 8787 }, ({ address, port }) => {
-  console.log(`roundwise-backend on http://${address}:${port}/v1 (db: ${dbPath})`);
+  console.log(`interviewsyntax-backend on http://${address}:${port}/v1 (db: ${dbPath})`);
 });

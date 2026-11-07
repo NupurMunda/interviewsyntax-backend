@@ -1,6 +1,8 @@
-# roundwise-backend
+# interviewsyntax-backend
 
 Read-only REST API over the interview knowledge base. Hono + TypeScript. Runs locally on `node:sqlite` and deploys to Cloudflare Workers + D1 by swapping only the storage adapter.
+
+How the whole system works (data flow, caching, error handling, load control, monitoring): see [ARCHITECTURE.md](https://github.com/NupurMunda/interviewsyntax-frontend/blob/main/ARCHITECTURE.md) in the frontend repo.
 
 ## Run
 
@@ -28,10 +30,11 @@ All `GET`, under `/v1`. Success is `{data, meta}`, errors are `{error:{code,mess
 | `/companies?q=` | companies with counts per category (`dsa`, `hld`, `ai`, `behavioral`) |
 | `/companies/:slug` | profile, category counts, values, sources |
 | `/companies/:slug/dsa?time_window=&difficulty=&topic=` | sorted by frequency, desc |
-| `/companies/:slug/hld` | questions with approved solution links |
-| `/companies/:slug/ai` | AI questions |
+| `/companies/:slug/hld` | questions with our collected `links` and `summary` (plus the older approved `solutions`) |
+| `/companies/:slug/ai` | AI questions; each item has `has_answer` (true when a written answer exists) |
 | `/companies/:slug/behavioral` | values and topics |
-| `/resources/:id` | one resource; the only route that returns `content_md` |
+| `/resources/:id` | one resource; the only route that returns `content_md`, and carries its written interview `answer` (or `null`) |
+| `/prep/:kind` | `ai`: the questions that have a written answer, newest first, each with its `written` date. `system-design`: every question with its collected solution `links` (label and https url). Both include `meta.questions` (all questions) and per-topic `answered` / `total`. Optional `topic`, `page`, `limit` |
 | `/sources` | credits and licenses |
 
 `time_window` is `30d`, `3m`, `6m` (default), `6m+` or `all`. Send `6m+` URL-encoded as `6m%2B`. If the window (after filters) has fewer than 5 rows, the response falls back to `all` and sets `meta.fallback: true` and `meta.time_window: "all"`.
@@ -43,6 +46,15 @@ All `GET`, under `/v1`. Success is `{data, meta}`, errors are `{error:{code,mess
 - Categories: `leetcode` is `dsa`; `hld` and `system-design` are `hld`; `ai`; `behavioral` comes from values and topics. `readme` rows are never listed.
 - A company appears if it has a visible resource or a visible profile.
 - Only approved `question_solutions` are returned.
+
+## Interview prep content
+
+Three tables hold the prep content, all built in the `kb` project from files under `kb/data/curated` and loaded to D1 with the rest:
+
+- `question_answers`: the written interview answers for AI questions (`answers/*.json`), matched to a question by exact category and title, so rebuilds keep them attached. Served by `/resources/:id` (`answer`) and `/prep/ai`.
+- `question_links` and `question_info`: for each system design question, the solution links we collected, a short description and its key concepts (`hld_links.txt`). Served by `/prep/system-design` and `/companies/:slug/hld`.
+
+Adding more answers later is a data-only change: rebuild the knowledge base, export, and load just those tables. No code deploy is needed, and the API's CDN cache means a new answer can take up to a day to show unless the cache is cleared.
 
 ## Deploy to Cloudflare
 
@@ -59,7 +71,7 @@ Rate limiting is 60 requests/min per IP: in memory locally, the Workers rate-lim
 
 ## Traffic and usage
 
-- **Request log**: every request writes one JSON line, `{"event":"request","method":"GET","route":"/v1/companies/:slug/dsa","status":200,"ms":12}`. It holds the route pattern, status and time only; no IPs, keys or query values. Observability is on in `wrangler.toml`, so view it in the Cloudflare dashboard under **Workers & Pages → roundwise-backend → Logs**, or live with `npx wrangler tail roundwise-backend --format pretty`.
+- **Request log**: every request writes one JSON line, `{"event":"request","method":"GET","route":"/v1/companies/:slug/dsa","status":200,"ms":12}`. It holds the route pattern, status and time only; no IPs, keys or query values. Observability is on in `wrangler.toml`, so view it in the Cloudflare dashboard under **Workers & Pages → interviewsyntax-backend → Logs**, or live with `npx wrangler tail interviewsyntax-backend --format pretty`.
 - **Request, error and CPU graphs**: the same page, under **Metrics**. A rise in 503s means D1 is failing (for example the daily free limit).
 - **D1 cost**: `npm run usage` lists the ten queries that read the most rows today. The free plan allows 5,000,000 rows read and 100,000 rows written per day, so check this after any query change.
 - **Per-visitor limits**: the Netlify proxy forwards each visitor's IP as `x-client-ip`, so the 60 requests/minute limit is per visitor, not per proxy.

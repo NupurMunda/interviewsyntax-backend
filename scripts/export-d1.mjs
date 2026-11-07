@@ -25,6 +25,12 @@ const tables = [
     WHERE ${RESOURCE_OK} ORDER BY cr.company_id, cr.resource_id, cr."window"`],
   ['question_solutions', `SELECT qs.* FROM question_solutions qs JOIN sources s ON s.id = qs.source_id JOIN resources r ON r.id = qs.question_id
     JOIN sources rs ON rs.id = r.source_id WHERE qs.approved = 1 AND ${OK_SOURCE} AND r.category IN (${SERVED}) AND rs.display_mode IN ('full','link') ORDER BY qs.id`],
+  ['question_answers', `SELECT qa.* FROM question_answers qa JOIN sources s ON s.id = qa.source_id JOIN resources r ON r.id = qa.resource_id
+    JOIN sources rs ON rs.id = r.source_id WHERE ${OK_SOURCE} AND r.category IN (${SERVED}) AND rs.display_mode IN ('full','link') ORDER BY qa.resource_id`],
+  ['question_links', `SELECT ql.* FROM question_links ql JOIN sources s ON s.id = ql.source_id JOIN resources r ON r.id = ql.resource_id
+    JOIN sources rs ON rs.id = r.source_id WHERE ${OK_SOURCE} AND r.category IN (${SERVED}) AND rs.display_mode IN ('full','link') ORDER BY ql.resource_id, ql.position`],
+  ['question_info', `SELECT qi.* FROM question_info qi JOIN sources s ON s.id = qi.source_id JOIN resources r ON r.id = qi.resource_id
+    JOIN sources rs ON rs.id = r.source_id WHERE ${OK_SOURCE} AND r.category IN (${SERVED}) AND rs.display_mode IN ('full','link') ORDER BY qi.resource_id`],
   ['company_profiles', `SELECT t.* FROM company_profiles t JOIN sources s ON s.id = t.source_id WHERE ${OK_SOURCE} ORDER BY t.company_id`],
   ['company_values', `SELECT t.* FROM company_values t JOIN sources s ON s.id = t.source_id WHERE ${OK_SOURCE} ORDER BY t.id`],
   ['behavioral_topics', `SELECT t.* FROM behavioral_topics t JOIN sources s ON s.id = t.source_id WHERE ${OK_SOURCE} ORDER BY t.rowid`],
