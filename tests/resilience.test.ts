@@ -166,3 +166,54 @@ describe('visitor tracking', () => {
     expect(events).toEqual([]);
   });
 });
+
+describe('traffic points', () => {
+  const collect = () => {
+    const points: any[] = [];
+    return { points, traffic: { write: (p: unknown) => void points.push(p) } };
+  };
+
+  it('writes one point per request with route, method, status and time, and no address', async () => {
+    const { points, traffic } = collect();
+    const app = createApp(sqliteStore(fixture), { ...config, apiKey: 'secret-key', traffic });
+    const headers = { 'x-api-key': 'secret-key', 'x-client-ip': '198.51.100.9' };
+    await app.request('/v1/companies/acme/dsa?time_window=all', { headers });
+    await app.request('/v1/companies/nobody', { headers });
+    await app.request('/v1/companies');
+    expect(points.map((p) => [p.blobs[0], p.blobs[1], p.blobs[2], p.doubles[0]])).toEqual([
+      ['request', '/v1/companies/:slug/dsa', 'GET', 200], ['request', '/v1/companies/:slug', 'GET', 404], ['request', '/v1/companies', 'GET', 401],
+    ]);
+    expect(points.every((p) => p.blobs.length === 6 && p.doubles.length === 2 && typeof p.doubles[1] === 'number' && p.indexes.length === 1)).toBe(true);
+    expect(JSON.stringify(points)).not.toMatch(/198\.51\.100|secret-key|time_window|nobody/);
+  });
+
+  it('writes one track point per ping with the page, company, category and a daily visitor hash', async () => {
+    const { points, traffic } = collect();
+    const app = createApp(sqliteStore(fixture), { ...config, apiKey: 'secret-key', traffic });
+    const headers = { 'x-api-key': 'secret-key', 'x-client-ip': '198.51.100.9' };
+    await app.request('/v1/ping?kind=view&page=company&company=acme', { headers });
+    await app.request('/v1/ping?kind=query&company=acme&category=hld', { headers });
+    await app.request('/v1/ping?kind=error&status=503', { headers });
+    const track = points.filter((p) => p.blobs[0] === 'track');
+    expect(track.map((p) => [p.blobs[1], p.blobs[2], p.blobs[3], p.blobs[4], p.doubles[0]])).toEqual([
+      ['view', 'company', 'acme', '', 0], ['query', '', 'acme', 'hld', 0], ['error', '', '', '', 503],
+    ]);
+    expect(track.every((p) => /^[0-9a-f]{12}$/.test(p.blobs[5]))).toBe(true);
+    expect(JSON.stringify(points)).not.toMatch(/198\.51\.100|secret-key/);
+  });
+
+  it('keeps answering when recording a point fails, and when there is no sink at all', async () => {
+    const { analyticsSink } = await import('../src/traffic');
+    const broken = analyticsSink({ writeDataPoint() { throw new Error('analytics down'); } });
+    const quiet = (await import('vitest')).vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const withBroken = createApp(sqliteStore(fixture), { ...config, traffic: broken });
+      expect((await withBroken.request('/v1/health')).status).toBe(200);
+      expect((await withBroken.request('/v1/ping?kind=view&page=home')).status).toBe(200);
+      const without = createApp(sqliteStore(fixture), config);
+      expect((await without.request('/v1/health')).status).toBe(200);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+});

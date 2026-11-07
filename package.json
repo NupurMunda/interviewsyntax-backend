@@ -9,6 +9,7 @@
     "start": "tsx src/server.ts",
     "test": "vitest run",
     "export:d1": "tsx scripts/export-d1.mjs",
+    "dashboard": "tsx scripts/dashboard.mjs",
     "usage": "wrangler d1 insights roundwise-db --timePeriod 1d --sort-type sum --sort-by reads --limit 10",
     "deploy": "npx wrangler deploy"
   },

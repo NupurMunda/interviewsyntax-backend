@@ -2,6 +2,8 @@ import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import type { RateLimiter } from './rate-limit';
+import { buildReport, loadRaw, MAX_DAYS, renderHtml, type AnalyticsAccess } from './dashboard';
+import { requestPoint, trackPoint, type TrafficSink } from './traffic';
 import { StoreUnavailableError, type CompanyRef, type DataStore } from './store/types';
 
 export interface AppConfig {
@@ -9,7 +11,42 @@ export interface AppConfig {
   apiKey?: string;
   rateLimiter: RateLimiter;
   clientIp(c: Context): string;
+  traffic?: TrafficSink;
+  // The password-protected traffic dashboard at /admin. Leave it out and the route does not exist.
+  admin?: { password: string; analytics?: AnalyticsAccess };
 }
+
+// Compares two secrets without leaking, through timing, how many leading characters matched.
+async function sameSecret(a: string, b: string): Promise<boolean> {
+  const encode = new TextEncoder();
+  const [x, y] = await Promise.all([crypto.subtle.digest('SHA-256', encode.encode(a)), crypto.subtle.digest('SHA-256', encode.encode(b))]);
+  const left = new Uint8Array(x);
+  const right = new Uint8Array(y);
+  let diff = 0;
+  for (let i = 0; i < left.length; i++) diff |= left[i] ^ right[i];
+  return diff === 0;
+}
+
+function basicPassword(header: string | undefined): string | null {
+  if (!header?.startsWith('Basic ')) return null;
+  try {
+    const decoded = atob(header.slice(6).trim());
+    const colon = decoded.indexOf(':');
+    return colon < 0 ? null : decoded.slice(colon + 1);
+  } catch {
+    return null;
+  }
+}
+
+const adminQuery = z.object({ days: z.coerce.number().int().min(1).max(MAX_DAYS).default(7) }).strict();
+const ADMIN_CACHE_MS = 60_000;
+const ADMIN_HEADERS = {
+  'Cache-Control': 'no-store',
+  'X-Robots-Tag': 'noindex',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+};
 
 class HttpError extends Error {
   constructor(readonly status: 400 | 404, readonly code: string, message: string) {
@@ -201,6 +238,7 @@ export function createApp(store: DataStore, config: AppConfig) {
     const event = parse(c, trackQuery);
     const visitor = await visitorId(rateLimitKey(c), new Date().toISOString().slice(0, 10), config.apiKey ?? '');
     console.log(JSON.stringify({ event: 'track', ...event, visitor }));
+    config.traffic?.write(trackPoint(event, visitor));
     return c.json({ data: { ok: true }, meta: {} });
   });
 
@@ -209,10 +247,35 @@ export function createApp(store: DataStore, config: AppConfig) {
     const started = Date.now();
     await next();
     const route = c.req.matchedRoutes.map((r) => r.path).filter((p) => !p.endsWith('*')).at(-1) ?? 'unmatched';
-    console.log(JSON.stringify({ event: 'request', method: c.req.method, route, status: c.res.status, ms: Date.now() - started }));
+    const ms = Date.now() - started;
+    console.log(JSON.stringify({ event: 'request', method: c.req.method, route, status: c.res.status, ms }));
+    if (route !== '/admin') config.traffic?.write(requestPoint(route, c.req.method, c.res.status, ms));
   });
 
   app.route('/v1', v1);
+
+  // Live traffic dashboard. Outside /v1 (so the API key and CORS rules do not apply) and not reachable through the site's proxy.
+  const adminPages = new Map<number, { at: number; html: string }>();
+  app.get('/admin', async (c) => {
+    const admin = config.admin;
+    if (!admin) return c.json({ error: { code: 'not_found', message: 'route not found' } }, 404);
+    const { allowed, retryAfter } = await config.rateLimiter.check(`admin:${config.clientIp(c)}`);
+    if (!allowed) return c.json({ error: { code: 'rate_limited', message: 'too many requests' } }, 429, { 'Retry-After': String(retryAfter), ...ADMIN_HEADERS });
+    const given = basicPassword(c.req.header('authorization'));
+    if (given === null || !(await sameSecret(given, admin.password))) {
+      return c.text('Authentication required', 401, { 'WWW-Authenticate': 'Basic realm="InterviewSyntax dashboard", charset="UTF-8"', ...ADMIN_HEADERS });
+    }
+    const parsed = adminQuery.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
+    if (!parsed.success) return c.json({ error: { code: 'bad_request', message: 'days must be a whole number from 1 to 90' } }, 400, ADMIN_HEADERS);
+    if (!admin.analytics) return c.text('The dashboard is not configured: the Analytics Engine token is missing.', 503, ADMIN_HEADERS);
+    const { days } = parsed.data;
+    const cached = adminPages.get(days);
+    const html = cached && Date.now() - cached.at < ADMIN_CACHE_MS
+      ? cached.html
+      : renderHtml(buildReport(await loadRaw(days, admin.analytics), days), { periods: [1, 7, 30, 90] });
+    if (!cached || html !== cached.html) adminPages.set(days, { at: Date.now(), html });
+    return c.html(html, 200, ADMIN_HEADERS);
+  });
   app.notFound((c) => c.json({ error: { code: 'not_found', message: 'route not found' } }, 404));
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: { code: err.code, message: err.message } }, err.status);

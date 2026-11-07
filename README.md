@@ -65,6 +65,22 @@ Adding more answers later is a data-only change: rebuild the knowledge base, exp
 
 Rate limiting is 60 requests/min per IP: in memory locally, the Workers rate-limit binding (`RATE_LIMITER`) in production.
 
+## Traffic dashboard
+
+Every request and every usage event is also written to Cloudflare Analytics Engine (dataset `interviewsyntax_traffic`, kept 90 days; the layout is documented in `src/traffic.ts`). Nothing identifying is stored. A failed write never affects a response.
+
+The dashboard (`src/dashboard.ts`) shows success and failure rate, the most used APIs with their failure rate, requests per day, median and slowest-5% response time, the most clicked companies, round types, pages, unique visitors and failures the browser saw.
+
+- **Live**: `https://interviewsyntax-backend.nupurmunda66.workers.dev/admin` (add `?days=30`, 1 to 90). It asks for a password (any user name), sends `no-store`, `noindex` and a strict content security policy, is rate limited, caches the result for 60 seconds so refreshing does not spend analytics queries, and does not exist at all until `ADMIN_PASSWORD` is set.
+- **Local copy**: `npm run dashboard` writes `dist/dashboard.html`; `npm run dashboard -- --sample` previews the layout with fake numbers and needs no token.
+
+Setup, once:
+1. Create an API token at Cloudflare → My Profile → API Tokens → Create Token → Custom, with permission **Account · Account Analytics · Read** and nothing else.
+2. `npx wrangler secret put CF_ANALYTICS_TOKEN` (paste the token) and `npx wrangler secret put ADMIN_PASSWORD` (a long random password).
+3. Deploy. For `npm run dashboard` put `CLOUDFLARE_API_TOKEN=...` in `.env.dashboard` (git-ignored).
+
+Reading it: route counts include only calls that reached the server. The CDN answers most repeat requests, so these numbers are the load the backend really carried. Company clicks are reported by the browser, so cached page views are included.
+
 ## Layout
 
 `src/app.ts` routes · `src/store/queries.ts` the SQL, shared by both adapters · `src/store/sqlite.ts` and `src/store/d1.ts` thin adapters · `src/rate-limit.ts` · `src/server.ts` and `src/worker.ts` entries. The local adapter builds `company_stats` as a temp table, so the database file is never written.
